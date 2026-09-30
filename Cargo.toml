@@ -1,0 +1,25 @@
+[package]
+name = "reignite"
+version = "0.1.0"
+edition = "2024"
+description = "Opt-in Linux recovery for interrupted coding-agent sessions"
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/bigFin/reignite"
+keywords = ["recovery", "coding-agents", "pi", "linux"]
+categories = ["command-line-utilities"]
+# Publishing source on GitHub does not authorize a crates.io release.
+publish = false
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+fs2 = "0.4"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"

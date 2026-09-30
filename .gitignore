@@ -1,0 +1,19 @@
+/target/
+/result
+/result-*
+/.direnv/
+/.pi/
+/node_modules/
+
+# Imported source archives are backups, not repository contents.
+/reignite-*.tar.gz*
+
+# Local Python artifacts, credentials, and recovery/session data.
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+/state/
+/assistant-sessions*.json
+*.jsonl
