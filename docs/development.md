@@ -44,7 +44,14 @@ acknowledgements without retries. Their lifecycle authority is fabricated, not
 proof of native automatic eligibility. Native assessment tests separately cover
 strict raw ancestry, branch separation, questions through metadata, opaque context,
 tool uncertainty, removed workspaces and unmodified policy/attempts across aliases
-and schema-1 reads. All assert observation-only actions without harness launches. Manual handoff
+and schema-1 reads. The cancellation gate adds scoped vetoes, non-rearming user
+segments, optional usage attribution/unknowns and bounded unsafe-source refusals;
+all assert unchanged policy/native/log bytes and no automatic candidate. Discovery
+CLI tests cover ordinary/custom roots, nested native files, aliases, read-only
+schema-1 attempt retention, partial coverage, unsafe/corrupt sources, aggregate
+limits and terminal-safe plain output. See [discovery](discovery.md) and the
+[cancellation gate](cancellation-gate.md). All assert observation-only actions
+without harness launches. Manual handoff
 fixtures use a PTY/native-client stand-in to check terminal-only execution, PID/
 profile preservation, unchanged disable/attempt state and known live-owner refusal.
 
@@ -56,6 +63,8 @@ nix develop --command bash scripts/check.sh --native-integration
 # Or the individual native smokes after building the CLI:
 nix develop --command python3 scripts/pi-rpc-smoke.py
 nix develop --command node scripts/pi-eligibility-smoke.mjs
+nix develop --command python3 scripts/pi-intent-smoke.py
+nix develop --command python3 scripts/pi-owned-launch-smoke.py
 nix develop --command python3 scripts/pi-delivery-smoke.py
 nix develop --command python3 scripts/pi-handoff-smoke.py
 ```
@@ -74,8 +83,39 @@ The SDK smoke uses real supported `SessionManager` operations: two managers can
 open the same native file, while `branch()`/`resetLeaf()` change active context
 without persisted changes. Native assessment stays observation-only. The RPC
 smoke also compares assessments with/without outstanding dialogs despite idle
-state and an empty queue. No model work or ownership inference is made by these
+state and an empty queue. The SDK smoke additionally uses Pi's own session writer
+to create an explicit fixture in its normal workspace-grouped storage, discovers
+it without enrollment, and checks unchanged source bytes. No model work or
+ownership inference is made by these
 [evidence tests](native-eligibility.md).
+
+The intent smoke sends a real native abort to a running offline provider and
+observes its cancelled signal before the provider emits its final message.
+During a bounded slow unwind, the active and cancelled snapshots have identical
+RPC state, entries, messages and file bytes. Killing only that exact owned PID
+loses the cancellation evidence; reopening starts no work. A normally completed
+abort control confirms that Pi does persist the final aborted message. A separate
+fixture proves two RPC processes can both run explicit model calls on the same
+session file, with different runtime leaves and no native execution fence.
+An optional test copy of the usage schema is written from native `message_end`,
+not provider markers. It stays empty during the pending-abort gap; normally
+completed cancellation records block the gate. Reignite receives no test markers
+or legacy lifecycle enrollment, and assessment stays observation-only throughout.
+There are no network/model costs or reboots. The intent, RPC dialog, native TUI
+handoff and SDK tests passed against Pi 1.0.0; see the
+[version-specific results](native-eligibility.md#pi-100-verification). Cancellation
+before persistence remains unresolved, not an automatic recovery acceptance.
+
+The owned-launch research smoke embeds Pi's public SDK and its own TUI. It saves
+a native-ID disable through the existing Rust store before forwarding Escape,
+then verifies real cancellation and exact-PID loss before the final aborted
+message reaches history. The hold survives a no-work reopen. Native selectors
+remain unanswered. A backend-held lock blocks a second cooperating launch even
+after the client closes its descriptor, but cannot fence bare Pi. This is a
+restricted test profile, not a production launcher, native recovery episode or
+full CLI-profile compatibility. This launch-host product direction was rejected;
+the fixture remains ordering evidence only. See
+[controlled Pi launch](controlled-pi-launch.md).
 
 The delivery smoke exercises Reignite's [bounded owned transport](pi-rpc-transport.md)
 through the real CLI: an offline original model turn is active, its exact owned
@@ -113,6 +153,42 @@ group and saves no raw terminal logs.
 The tmux test uses upstream restore, a stub Pi, and a private socket/config. It
 stops only its own server. Pi delivery and tmux transport are tested separately;
 neither test verifies a full reboot.
+
+## Observing real Spot restarts on Kitu
+
+Kitu is the intended live test host. Development can continue on a separate
+machine while the session on Kitu handles installation. Observe natural Spot
+evictions; this does not authorize forced reboots, service changes, or a second
+installation from the development session.
+
+Before the first observation, get the installed commit, executable path,
+persistent state directory, and any enabled services or boot hooks from the
+installing session. Version `0.1.0` alone does not identify the tested commit.
+For passive observation, select an existing Pi session and leave its work
+untouched; no disposable session is required. Use temporary sessions only for
+controlled process-kill tests on the development host. Do not scan or resume
+unrelated live conversations.
+
+Keep a before-restart baseline of the boot ID, selected session's ID and file
+hash, recovery settings, and any existing attempt records. Save this privately
+on storage expected to survive eviction, without copying prompts or credentials.
+After Kitu returns, check that the boot ID changed and compare those same files
+and settings. Inspect first; do not submit a continuation just to test whether it
+works. Reopening must not answer a question or start work without permission.
+Surviving remote child agents must be left alone.
+
+Keep private observations outside source commits (for example, a private
+`.git/reignite-observations/` directory). Do not publish session paths, IDs or
+history hashes as part of the source update. If the installed executable or
+configured persistent state location cannot be confirmed, record that gap rather
+than claiming policy survived. A baseline taken before activation is not evidence
+for the newly activated build; record the new build and state location afterward.
+
+The current milestone can test retained history/settings and explicit manual
+reopening. It cannot demonstrate automatic native recovery: that feature is not
+implemented. The older ticket-based continuation path needs its own explicit
+test scope. Record actual before/after results and missing evidence rather than
+treating installation, SSH returning, or a successful build as recovery success.
 
 ## Current upstream compatibility
 

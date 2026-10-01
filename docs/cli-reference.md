@@ -1,8 +1,9 @@
 # CLI reference
 
-Successful JSON commands return `{"ok":true,"result":...}`. The interactive
-`handoff-pi` exception inherits Pi's terminal output and exit status. Failures return
-`{"ok":false,"error":"..."}` and exit 1. Argument/help handling uses clap's normal
+Successful JSON commands return `{"ok":true,"result":...}`; their failures return
+`{"ok":false,"error":"..."}` and exit 1. `discover` defaults to plain-English output
+and plain stderr errors (exit 1); `discover --json` uses the JSON envelope.
+The interactive `handoff-pi` inherits Pi's terminal output and exit status. Argument/help handling uses clap's normal
 stderr and exit behavior. `--state-dir` / `REIGNITE_STATE_DIR` selects policy state;
 [pure inspection](#pi-native-inspection) does not create or modify that state.
 
@@ -31,6 +32,19 @@ status reads plus at most one record. Truncation/corrupt/missing data remain
 visible. Prompts, tool arguments, and contracts are not returned. File/byte/time
 metrics support measurement, not claims of a performance advantage.
 
+## Find saved sessions
+
+`reignite discover` finds existing Pi storage across workspaces and prints a
+plain-English report. No session registration, launch or automatic recovery occurs.
+Use `--sessions-root /absolute/canonical/directory` (repeatable) for custom
+locations, or `--json` for the existing machine-readable envelope. The request
+form is `discover_pi` with optional `sessions_roots`; missing/empty roots use the
+current user's standard/native environment-selected storage.
+
+[Discovery coverage and limits](discovery.md) explain aliases, incomplete searches,
+read-only policy/attempt retention, and why finding a file does not prove that
+work was interrupted or is safe to restart. It installs no boot hook.
+
 ## Native Pi eligibility assessment
 
 ```sh
@@ -38,8 +52,13 @@ reignite assess-pi --session /absolute/canonical/session.jsonl \
   --subagents-root /absolute/canonical/runtime-root
 ```
 
-`--subagents-root` is optional and defaults to `PI_SUBAGENTS_TEMP_ROOT`. This
-policy-aware report needs no enrollment, never launches Pi or issues a ticket,
+`--subagents-root` is optional and defaults to `PI_SUBAGENTS_TEMP_ROOT`.
+`--usage-log /absolute/canonical/usage.jsonl` optionally reads an existing Fabric
+Pi usage schema-1 log; no path is guessed and no tracker is installed. The
+`recovery_gate` reports `blocked` or `hold`, never an automatic candidate. See
+[cancellation and uncertainty](cancellation-gate.md) for source attribution and
+32 MiB/64 KiB/65,536-record bounds. This policy-aware report needs no enrollment,
+never launches Pi or issues a ticket,
 and always returns `eligible: false`, `decision: "observe_only"`. Only
 `actions.inspect` is allowed. It separates verified policy/selected-file facts,
 retained attempts/blockers, raw persisted-lineage signals and missing authority.
@@ -52,7 +71,8 @@ Missing workspaces are reported without loading/repair. Strict ancestry and
 
 Policy reads may create the directory/lock, but never rewrite `state.json`,
 migrate state or change native/child records. The JSON request equivalent is
-`assess_pi` with `session_file` and optional `subagents_root`. Read the
+`assess_pi` with `session_file` and optional `subagents_root` and `usage_log`.
+Omitting `usage_log` remains supported. Read the
 [evidence contract and native proofs](native-eligibility.md) before interpreting
 reported history or the transitional transport as authorization.
 

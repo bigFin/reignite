@@ -9,7 +9,6 @@ import os
 import pathlib
 import selectors
 import shutil
-import signal
 import subprocess
 import tempfile
 import time
@@ -88,7 +87,12 @@ with tempfile.TemporaryDirectory(prefix="reignite-pi-rpc-") as temporary:
     for with_dialogs in (False, True, True):
         child = subprocess.Popen(args + (["-e", str(dialogs)] if with_dialogs else []),
                                  cwd=project, env=env, stdin=subprocess.PIPE,
-                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        def owned_start():
+            fields = pathlib.Path(f"/proc/{child.pid}/stat").read_text().rsplit(")", 1)[1].split()
+            assert int(fields[1]) == os.getpid(), "not our immediate test child"
+            return fields[19]
+        start_identity = owned_start()
         selector = selectors.DefaultSelector()
         selector.register(child.stdout, selectors.EVENT_READ, "stdout")
         selector.register(child.stderr, selectors.EVENT_READ, "stderr")
@@ -167,7 +171,8 @@ with tempfile.TemporaryDirectory(prefix="reignite-pi-rpc-") as temporary:
         finally:
             selector.close()
             if child.poll() is None:
-                os.killpg(child.pid, signal.SIGKILL)
+                assert owned_start() == start_identity, "test PID/start identity changed"
+                child.kill()  # Exactly the tracked immediate child; never a process group.
             child.wait(timeout=5)
             for pipe in (child.stdin, child.stdout, child.stderr):
                 if pipe and not pipe.closed:

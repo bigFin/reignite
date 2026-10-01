@@ -65,7 +65,7 @@ pub struct Warning {
     pub reason: &'static str,
 }
 
-fn open_source(path: &Path, max: u64) -> Result<File> {
+pub(crate) fn open_source(path: &Path, max: u64) -> Result<File> {
     crate::canonical(path)?;
     let file = OpenOptions::new()
         .read(true)
@@ -84,7 +84,7 @@ fn open_source(path: &Path, max: u64) -> Result<File> {
     Ok(file)
 }
 
-fn unchanged(path: &Path, file: &File, before: &fs::Metadata) -> Result<()> {
+pub(crate) fn unchanged(path: &Path, file: &File, before: &fs::Metadata) -> Result<()> {
     fn signature(meta: &fs::Metadata) -> (u64, u64, u64, i64, i64, i64, i64) {
         (
             meta.dev(),
@@ -149,8 +149,10 @@ fn session(
     require_workspace: bool,
     mut evidence: Option<&mut crate::pi_evidence::Index>,
     required_leaf: Option<&str>,
+    max_bytes: u64,
 ) -> Result<(Session, u64)> {
-    let file = open_source(path, MAX_SESSION_BYTES)?;
+    let max_bytes = max_bytes.min(MAX_SESSION_BYTES);
+    let file = open_source(path, max_bytes)?;
     let metadata = file.metadata()?;
     let mut reader = BufReader::new(file);
     let mut bytes = 0;
@@ -160,7 +162,7 @@ fn session(
     loop {
         line.clear();
         let count = (&mut reader)
-            .take(MAX_RECORD_BYTES + 1)
+            .take((MAX_RECORD_BYTES + 1).min(max_bytes.saturating_sub(bytes) + 1))
             .read_until(b'\n', &mut line)?;
         if count == 0 {
             break;
@@ -170,7 +172,7 @@ fn session(
             "session entry exceeds inspection byte limit"
         );
         bytes += count as u64;
-        ensure!(bytes <= MAX_SESSION_BYTES, "session grew beyond byte limit");
+        ensure!(bytes <= max_bytes, "session grew beyond byte limit");
         ensure!(line.ends_with(b"\n"), "incomplete session write");
         let entry: Value = serde_json::from_slice(&line).context("invalid session JSON")?;
         if let Some(report) = &mut report {
@@ -225,7 +227,14 @@ fn session(
 
 /// Apply the same bounded, stable-file validation to retained legacy identities.
 pub(crate) fn registered_session(identity: &crate::Identity) -> Result<Session> {
-    Ok(session(&identity.session_file, true, None, identity.leaf.as_deref())?.0)
+    Ok(session(
+        &identity.session_file,
+        true,
+        None,
+        identity.leaf.as_deref(),
+        MAX_SESSION_BYTES,
+    )?
+    .0)
 }
 
 fn status(path: &Path, files_read: &mut usize, bytes_read: &mut u64) -> Result<Value> {
@@ -358,7 +367,7 @@ fn delegated(root: Option<&Path>, session: &Session) -> Result<(Delegated, usize
 /// Inspect only the selected files; do not create recovery state, reconcile,
 /// signal processes, load extensions, or launch the harness.
 pub fn inspect(path: &Path, subagents_root: Option<&Path>) -> Result<Inspection> {
-    inspect_with(path, subagents_root, true, None)
+    inspect_with(path, subagents_root, true, None, MAX_SESSION_BYTES)
 }
 
 pub(crate) fn inspect_for_assessment(
@@ -366,7 +375,23 @@ pub(crate) fn inspect_for_assessment(
     subagents_root: Option<&Path>,
 ) -> Result<(Inspection, crate::pi_evidence::PersistedLineage)> {
     let mut index = crate::pi_evidence::Index::default();
-    let inspection = inspect_with(path, subagents_root, false, Some(&mut index))?;
+    let inspection = inspect_with(
+        path,
+        subagents_root,
+        false,
+        Some(&mut index),
+        MAX_SESSION_BYTES,
+    )?;
+    Ok((inspection, index.finish()))
+}
+
+/// Discovery reserves this file's observed size against a host-wide read budget.
+pub(crate) fn inspect_for_discovery(
+    path: &Path,
+    max_bytes: u64,
+) -> Result<(Inspection, crate::pi_evidence::PersistedLineage)> {
+    let mut index = crate::pi_evidence::Index::default();
+    let inspection = inspect_with(path, None, false, Some(&mut index), max_bytes)?;
     Ok((inspection, index.finish()))
 }
 
@@ -375,9 +400,10 @@ fn inspect_with(
     subagents_root: Option<&Path>,
     require_workspace: bool,
     evidence: Option<&mut crate::pi_evidence::Index>,
+    max_bytes: u64,
 ) -> Result<Inspection> {
     let start = Instant::now();
-    let (session, session_bytes) = session(path, require_workspace, evidence, None)?;
+    let (session, session_bytes) = session(path, require_workspace, evidence, None, max_bytes)?;
     let (delegated, run_files, run_bytes) = delegated(subagents_root, &session)?;
     Ok(Inspection {
         schema: 1,

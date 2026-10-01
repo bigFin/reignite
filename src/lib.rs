@@ -1,9 +1,11 @@
 //! Recovery policy and standalone inspection. Never persist commands or prompts.
 pub mod codex_probe;
+pub mod discovery;
 pub mod eligibility;
 pub mod inspection;
 pub mod pi_delivery;
 mod pi_evidence;
+pub mod pi_gate;
 pub mod pi_handoff;
 mod pi_rpc;
 pub mod policy;
@@ -179,9 +181,14 @@ pub enum Request {
     PolicyStatus {
         session_file: Option<PathBuf>,
     },
+    DiscoverPi {
+        #[serde(default)]
+        sessions_roots: Vec<PathBuf>,
+    },
     AssessPi {
         session_file: PathBuf,
         subagents_root: Option<PathBuf>,
+        usage_log: Option<PathBuf>,
     },
     SetHostPolicy {
         enabled: bool,
@@ -501,15 +508,27 @@ fn apply(db: &mut Database, req: Request, boot: &str) -> Result<(Value, bool)> {
                 false,
             ))
         }
+        Request::DiscoverPi { sessions_roots } => {
+            let roots = if sessions_roots.is_empty() {
+                discovery::default_roots()?
+            } else {
+                sessions_roots
+            };
+            let report = discovery::discover(roots, &db.policy, &db.records, boot, db.schema)?;
+            Ok((serde_json::to_value(report)?, false))
+        }
         Request::AssessPi {
             session_file,
             subagents_root,
+            usage_log,
         } => {
             let (inspection, lineage) =
                 inspection::inspect_for_assessment(&session_file, subagents_root.as_deref())?;
+            let usage = pi_gate::usage(usage_log.as_deref(), &inspection.session)?;
             let report = eligibility::assess(
                 inspection,
                 lineage,
+                usage,
                 &db.policy,
                 db.records.values(),
                 boot,

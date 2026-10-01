@@ -68,6 +68,11 @@ impl Fixture {
         let report = value["result"].clone();
         assert_eq!(report["eligible"], false);
         assert_eq!(report["decision"], "observe_only");
+        assert_eq!(report["recovery_gate"]["automatic_candidate"], false);
+        assert!(matches!(
+            report["recovery_gate"]["decision"].as_str(),
+            Some("blocked" | "hold")
+        ));
         for (action, allowed) in report["actions"].as_object().unwrap() {
             assert_eq!(allowed, &(action == "inspect"), "{report}");
         }
@@ -90,6 +95,38 @@ impl Fixture {
             );
         }
         report
+    }
+    fn usage_log(&self, rows: Vec<Value>) -> PathBuf {
+        let path = self.root.path().join("usage.jsonl");
+        fs::write(
+            &path,
+            rows.iter()
+                .map(|row| format!("{row}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        path
+    }
+    fn assess_usage(&self, path: &std::path::Path) -> Value {
+        let source = fs::read(&self.session).unwrap();
+        let usage = fs::read(path).ok();
+        let state = fs::read(self.state()).ok();
+        let value = self.cli(&["assess-pi", "--usage-log", path.to_str().unwrap()]);
+        assert_eq!(fs::read(&self.session).unwrap(), source);
+        assert_eq!(fs::read(path).ok(), usage);
+        assert_eq!(fs::read(self.state()).ok(), state);
+        if value["ok"] == true {
+            assert_eq!(value["result"]["eligible"], false);
+            assert_eq!(
+                value["result"]["recovery_gate"]["automatic_candidate"],
+                false
+            );
+            for (action, allowed) in value["result"]["actions"].as_object().unwrap() {
+                assert_eq!(allowed, &(action == "inspect"));
+            }
+        }
+        value
     }
     fn request(&self, request: Value) -> Value {
         let mut child = self
@@ -420,4 +457,233 @@ fn unsafe_sources_and_corrupt_policy_never_become_default_allow() {
     fs::write(f.state(), "{corrupt").unwrap();
     assert_eq!(f.cli(&["assess-pi"])["ok"], false);
     assert_eq!(fs::read_to_string(f.state()).unwrap(), "{corrupt");
+}
+
+fn gate_has(report: &Value, code: &str) -> bool {
+    report["recovery_gate"]["signals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|signal| signal["code"] == code)
+}
+fn usage_row(f: &Fixture, source: &str, stop: &str) -> Value {
+    json!({"schema_version":1,"timestamp":"PRIVATE-CANARY","cwd":f.cwd,
+        "stop_reason":stop,"status":200,"attribution":{"session_id":"native-id","source":source},
+        "provider":"PRIVATE-CANARY","model":"PRIVATE-CANARY"})
+}
+
+#[test]
+fn recorded_cancellation_stays_a_veto_within_reported_user_segment() {
+    let f = Fixture::new();
+    for stop in ["aborted", "error"] {
+        f.history(vec![
+            user("user1", Value::Null),
+            assistant("cancel", "user1", stop, json!([])),
+            assistant("later", "cancel", "stop", json!([])),
+            json!({"type":"label","id":"label1","parentId":"later","label":"PRIVATE-CANARY"}),
+        ]);
+        let report = f.assess();
+        assert_eq!(report["recovery_gate"]["decision"], "blocked");
+        assert!(gate_has(
+            &report,
+            if stop == "aborted" {
+                "reported_work_cancelled"
+            } else {
+                "reported_work_error"
+            }
+        ));
+        assert!(has(&report, "reported_cancel_or_error"));
+        assert_eq!(
+            report["persisted_lineage"]["last_assistant_stop_reason"],
+            "stop"
+        );
+        assert_eq!(
+            report["persisted_lineage"]["reported_work"]["user_entry"],
+            "user1"
+        );
+    }
+}
+
+#[test]
+fn a_later_user_message_does_not_rearm_or_permanently_disable_a_session() {
+    let f = Fixture::new();
+    f.history(vec![
+        user("user1", Value::Null),
+        assistant("cancel", "user1", "aborted", json!([])),
+        user("user2", json!("cancel")),
+    ]);
+    let report = f.assess();
+    assert_eq!(report["recovery_gate"]["decision"], "hold");
+    assert!(!gate_has(&report, "reported_work_cancelled"));
+    assert!(!has(&report, "reported_cancel_or_error"));
+    assert_eq!(
+        report["persisted_lineage"]["last_assistant_stop_reason"],
+        "aborted"
+    );
+    assert_eq!(
+        report["persisted_lineage"]["reported_work"]["user_entry"],
+        "user2"
+    );
+    assert!(!f.state().exists());
+    f.cli(&["disable"]);
+    assert_eq!(f.assess()["recovery_gate"]["decision"], "blocked");
+}
+
+#[test]
+fn abandoned_cancel_and_positive_looking_records_never_authorize() {
+    let f = Fixture::new();
+    f.history(vec![
+        user("user1", Value::Null),
+        assistant("cancel", "user1", "aborted", json!([])),
+        user("other", json!("user1")),
+    ]);
+    assert_eq!(f.assess()["recovery_gate"]["decision"], "hold");
+    for stop in ["toolUse", "stop", "length"] {
+        f.history(vec![
+            user("user1", Value::Null),
+            assistant("answer", "user1", stop, json!([])),
+        ]);
+        let report = f.assess();
+        assert_eq!(
+            report["recovery_gate"]["decision"],
+            if stop == "toolUse" { "hold" } else { "blocked" }
+        );
+    }
+}
+
+#[test]
+fn usage_cancellation_is_session_scoped_even_with_successful_http_status() {
+    let f = Fixture::new();
+    let path = f.usage_log(vec![usage_row(&f, "main", "aborted")]);
+    let result = f.assess_usage(&path);
+    assert_eq!(result["ok"], true);
+    let report = &result["result"];
+    assert_eq!(report["recovery_gate"]["decision"], "hold");
+    assert!(gate_has(report, "unscoped_main_cancellation_reported"));
+    assert!(!gate_has(report, "reported_work_cancelled"));
+    assert_eq!(
+        report["recovery_gate"]["usage_log"]["main_cancellations"],
+        1
+    );
+    assert_eq!(report["native_files_read"], 2);
+    assert_eq!(
+        report["native_bytes_read"],
+        fs::metadata(&f.session).unwrap().len() + fs::metadata(&path).unwrap().len()
+    );
+    assert!(!f.state().exists());
+}
+
+#[test]
+fn child_and_unrelated_usage_do_not_cancel_the_parent_or_merge_branches() {
+    let f = Fixture::new();
+    let mut unrelated = usage_row(&f, "main", "aborted");
+    unrelated["attribution"]["session_id"] = json!("other-id");
+    let path = f.usage_log(vec![unrelated, usage_row(&f, "child", "aborted")]);
+    let result = f.assess_usage(&path);
+    let report = &result["result"];
+    assert_eq!(report["recovery_gate"]["decision"], "hold");
+    assert!(!gate_has(report, "unscoped_main_cancellation_reported"));
+    assert!(gate_has(report, "child_accounting_not_execution_evidence"));
+    assert_eq!(
+        report["recovery_gate"]["usage_log"]["main_cancellations"],
+        0
+    );
+    assert_eq!(
+        report["recovery_gate"]["usage_log"]["child_cancellations"],
+        1
+    );
+    f.history(vec![
+        user("user1", Value::Null),
+        assistant("offbranch", "user1", "aborted", json!([])),
+        user("other", json!("user1")),
+    ]);
+    let path = f.usage_log(vec![usage_row(&f, "main", "aborted")]);
+    let result = f.assess_usage(&path);
+    assert_eq!(result["result"]["recovery_gate"]["decision"], "hold");
+    assert!(!gate_has(&result["result"], "reported_work_cancelled"));
+}
+
+#[test]
+fn usage_unknowns_wrong_workspace_and_sqlite_style_metadata_remain_uncertain() {
+    let f = Fixture::new();
+    let mut wrong_cwd = usage_row(&f, "main", "aborted");
+    wrong_cwd["cwd"] = json!("/PRIVATE-CANARY/other-workspace");
+    let path = f.usage_log(vec![
+        wrong_cwd,
+        usage_row(&f, "main", "future-stop"),
+        json!({"schema_version":1,"attribution":null}),
+        json!({"schema_version":2,"stop_reason":"aborted"}),
+        json!({"session_id":"native-id","status":"ok","metadata_json":"PRIVATE-CANARY"}),
+    ]);
+    let result = f.assess_usage(&path);
+    assert_eq!(result["ok"], true);
+    let usage = &result["result"]["recovery_gate"]["usage_log"];
+    assert_eq!(usage["identity_conflicts"], 1);
+    assert_eq!(usage["unattributed_records"], 1);
+    assert_eq!(usage["unsupported_records"], 3);
+    assert_eq!(usage["main_cancellations"], 0);
+    assert!(gate_has(&result["result"], "usage_identity_conflict"));
+    assert!(gate_has(
+        &result["result"],
+        "usage_attribution_or_format_incomplete"
+    ));
+}
+
+#[test]
+fn empty_or_successful_usage_never_supplies_crash_time_intent() {
+    let f = Fixture::new();
+    for rows in [
+        vec![],
+        vec![usage_row(&f, "main", "toolUse")],
+        vec![usage_row(&f, "main", "stop")],
+    ] {
+        let path = f.usage_log(rows);
+        let result = f.assess_usage(&path);
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["result"]["recovery_gate"]["decision"], "hold");
+        assert_eq!(
+            result["result"]["recovery_gate"]["usage_log"]["coverage"],
+            "partial_session_attribution_without_work_or_branch_correlation"
+        );
+    }
+    let result = f.request(json!({"op":"assess_pi","session_file":f.session}));
+    assert_eq!(result["recovery_gate"]["usage_log"]["selected"], false);
+    assert_eq!(result["recovery_gate"]["decision"], "hold");
+    let path = f.usage_log(vec![usage_row(&f, "main", "error")]);
+    let result = f.request(json!({"op":"assess_pi","session_file":f.session,"usage_log":path}));
+    assert!(gate_has(&result, "unscoped_main_error_reported"));
+    assert!(!f.state().exists());
+}
+
+#[test]
+fn unsafe_incomplete_corrupt_or_oversized_usage_fails_without_mutation() {
+    let f = Fixture::new();
+    let path = f.usage_log(vec![usage_row(&f, "main", "aborted")]);
+    let alias = f.root.path().join("usage-link.jsonl");
+    symlink(&path, &alias).unwrap();
+    assert_eq!(f.assess_usage(&alias)["ok"], false);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o660)).unwrap();
+    assert_eq!(f.assess_usage(&path)["ok"], false);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    for text in [
+        "{PRIVATE-CANARY}\n".to_owned(),
+        "{}".to_owned(),
+        format!("{}\n", "x".repeat(64 * 1024)),
+        "{}\n".repeat(65_537),
+    ] {
+        fs::write(&path, text).unwrap();
+        assert_eq!(f.assess_usage(&path)["ok"], false);
+    }
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&path)
+        .unwrap();
+    file.set_len(32 * 1024 * 1024 + 1).unwrap();
+    assert_eq!(f.assess_usage(&path)["ok"], false);
+    assert_eq!(
+        f.assess_usage(&f.root.path().join("missing-usage"))["ok"],
+        false
+    );
+    assert!(!f.state().exists());
 }

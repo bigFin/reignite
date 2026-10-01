@@ -1,7 +1,10 @@
 # Native Pi eligibility assessment
 
-`reignite assess-pi --session EXACT_FILE [--subagents-root EXACT_ROOT]` combines
-bounded native inspection with the **existing** host policy and retained attempts.
+`reignite assess-pi --session EXACT_FILE [--subagents-root EXACT_ROOT]
+[--usage-log EXISTING_LOG]` combines bounded native inspection with the
+**existing** host policy and retained attempts. Its read-only
+[cancellation gate](cancellation-gate.md) distinguishes recorded blockers from
+uncertainty, optionally using existing Fabric Pi usage JSONL.
 It needs no enrollment or Reignite extension and launches no harness. It never
 issues/claims a ticket, answers a dialog, resumes a child, or feeds lifecycle state.
 
@@ -76,14 +79,82 @@ policy/blockers are derived in memory and remain unchanged on disk.
   non-streaming/non-compacting state and empty message queue coexist with those
   waits. Native assessment remains observation-only with human-state evidence
   missing; no dialog response or model work is sent.
+- `scripts/pi-intent-smoke.py` sends a real native `abort` while an offline
+  provider is running. Its signal is cancelled, but during the provider's slow
+  unwind, `get_state`, `get_entries`, `get_messages` and the session bytes remain
+  identical to the active-work snapshot. Killing that exact PID before the final
+  message loses the cancellation evidence. Reopening starts no model work and
+  assessment stays observation-only. A separate control lets the abort finish
+  and verifies Pi does persist the final `aborted` message normally.
+- The same smoke also starts two real RPC processes on one disposable native
+  session file. Both accept explicit test prompts and run model calls, with the
+  same session ID/file and different in-memory leaves. There is no exclusive
+  execution lease obtained by either native loading or prompting. These are
+  offline fixture calls, not legitimate automatic recovery or permission to
+  duplicate a live session. Test markers establish ground truth only; Reignite
+  never reads them or receives fabricated lifecycle observations.
 - Rust CLI fixtures cover policy/alias/attempt retention, questions through
   metadata, branch separation, uncertain tools, opaque context, malformed graphs,
   bounded input and removed workspaces. Positive metadata is never promoted into
   a native authorization fixture.
 
+## Pi 1.0.0 verification
+
+The same real offline tests passed against installed Pi 1.0.0 on 2026-10-01:
+
+- Pending cancellation still leaves `get_state`, entries, messages, native bytes
+  and the optional fixture usage log identical to active work. Exact-PID loss
+  before the provider finishes still loses that cancellation evidence.
+- Normal cancellation completion persists `aborted` and blocks the gate.
+- Four native dialog kinds remain unanswered despite idle/empty-queue status;
+  disposing them does not approve anything. TUI loss at a selector or active
+  work and repeated reopening preserve the disable and start no recovery work.
+- Two explicit fixture prompts still run concurrently against the same session
+  file. Public SDK branch/reset still changes context without persisted changes.
+
+Read-only inspection of this release's implementation agrees with the tests:
+`AgentSession.abort()` sets an in-memory abort flag, cancels operations and waits
+for idle; `Agent.abort()` signals its in-memory controller. Native message
+persistence happens at `message_end`, after extension dispatch. This is not a
+persisted pre-cancellation record. The ordinary CLI still uses version-3 history;
+these results do not establish automatic recovery merely because another optional
+harness API offers durable operation types.
+
+Test cleanup targets tracked immediate subprocesses only, with PID/start checks,
+not names or process groups. No live configuration, Kitu agent, provider account
+or host reboot was involved. Pi 1.0.0 has not established a positive continuation
+case under this project's ordinary-startup constraints.
+
+## Current control-contract conclusion
+
+The reviewed public Pi SDK/RPC can load a selected history and control a new
+owned subprocess. It cannot attach to an existing TUI, acquire an exclusive
+session-file execution lease, or reconstruct a cancellation/human wait lost
+before persistence. A fresh RPC status describes the fresh process, not the
+crashed one. Even a live `isStreaming: true` snapshot can coexist with a pending
+abort. The persisted system loadout also does not reconstruct the complete
+original launch environment or permission profile.
+
+Under the current standalone/no-required-extension/no-competing-ledger
+constraints, no positive automatic continuation case has been established for
+ordinary existing Pi sessions. Do not implement one from an unfinished-looking
+user message, a last observed busy flag, or possession of new pipes. Another
+process-kill test, boot service, or VM cannot supply the missing contract.
+Explicit normal TUI reopening remains available; the older ticket route remains
+transport-only evidence. A supported owner-bound source of these facts is an
+implementation prerequisite, not a deferred test assertion.
+
+[Controlled-launch research](controlled-pi-launch.md) demonstrated one terminal
+input ordering path, but its startup wrapper/key interception was rejected as a
+product direction. It remains test evidence only. The current noninvasive work is
+the [cancellation and uncertainty gate](cancellation-gate.md), not a custom host.
+
 ## What comes next
 
-A supported owner-bound native route must establish the missing facts before
+Keep normal harness startup unchanged. Use existing native records and any
+already available, properly attributed telemetry to veto cancelled work and
+expose uncertainty. Do not convert absent cancellation records or a shutdown
+window into authorization. A supported owner-bound native route must establish the missing facts before
 any automatic continuation. Where it cannot, retain observation-only behavior
 and let the normal operator client make the next explicit decision. Human routing,
 episode/rearming policy and delegated recovery remain separate unfinished work.

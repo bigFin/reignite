@@ -14,7 +14,7 @@
           root = ./.;
           fileset = pkgs.lib.fileset.unions [
             ./Cargo.toml ./Cargo.lock ./src ./tests/cli.rs ./tests/inspection.rs ./tests/codex_probe.rs ./tests/host_policy.rs
-            ./tests/pi_delivery.rs ./tests/fixtures/pi-rpc-peer.py ./tests/native_eligibility.rs ./tests/pi_handoff.rs
+            ./tests/pi_delivery.rs ./tests/fixtures/pi-rpc-peer.py ./tests/native_eligibility.rs ./tests/pi_handoff.rs ./tests/discovery.rs
           ];
         };
         cargoLock.lockFile = ./Cargo.lock;

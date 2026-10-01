@@ -82,7 +82,31 @@ try {
   assert.equal(digest(), before);
   assert.deepEqual(assess().requirements, baseline.requirements);
   assert.equal(digest(), before);
-  console.log(`PASS: Pi ${metadata.version} SDK branch/reset without persisted change, concurrent managers, native assessment observe-only; no model/reboot/ownership inference`);
+  // Native writer creates a session in Pi's ordinary workspace-grouped storage.
+  // These are explicit fixture messages, not model work or recovery authorization.
+  const saved = SessionManager.create(project);
+  saved.appendMessage({ role: "user", content: "Offline discovery fixture", timestamp: 3 });
+  saved.appendMessage({ ...entries[2].message, stopReason: "aborted", timestamp: 4 });
+  const savedFile = saved.getSessionFile();
+  assert(savedFile);
+  const savedBytes = readFileSync(savedFile);
+  const discovered = spawnSync(cli, ["--state-dir", path.join(base, "state"), "discover", "--json"],
+    { env, encoding: "utf8", timeout: 10_000 });
+  assert.equal(discovered.status, 0, discovered.stdout);
+  const inventory = JSON.parse(discovered.stdout).result;
+  assert.equal(inventory.automatic_recovery_implemented, false);
+  assert.equal(inventory.boot_change_verified, false);
+  assert.equal(inventory.findings.length, 1);
+  assert.equal(inventory.findings[0].native_id, saved.getSessionId());
+  assert.equal(inventory.findings[0].category, "recorded_cancellation");
+  assert.equal(inventory.findings[0].gate_decision, "blocked");
+  const plain = spawnSync(cli, ["--state-dir", path.join(base, "state"), "discover"],
+    { env, encoding: "utf8", timeout: 10_000 });
+  assert.equal(plain.status, 0, plain.stderr);
+  assert(plain.stdout.includes("Nothing was restarted"));
+  assert(plain.stdout.includes("Saved history reports cancellation"));
+  assert.deepEqual(readFileSync(savedFile), savedBytes);
+  console.log(`PASS: Pi ${metadata.version} SDK branch/reset without persisted change, concurrent managers, native-written session discovered without enrollment and left unchanged; no model/reboot/ownership inference`);
 } finally {
   rmSync(base, { recursive: true, force: true });
 }

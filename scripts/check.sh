@@ -40,6 +40,8 @@ nix flake check --no-update-lock-file
 if "$native"; then
   python3 scripts/pi-rpc-smoke.py
   node scripts/pi-eligibility-smoke.mjs
+  python3 scripts/pi-intent-smoke.py
+  python3 scripts/pi-owned-launch-smoke.py
   python3 scripts/pi-delivery-smoke.py
   python3 scripts/pi-handoff-smoke.py
 fi

@@ -8,7 +8,7 @@ use std::{
 };
 
 #[derive(Parser)]
-#[command(version, about = "Standalone Linux agent recovery tools (JSON output)")]
+#[command(version, about = "Standalone Linux agent recovery tools")]
 struct Cli {
     #[arg(long, env = "REIGNITE_STATE_DIR")]
     state_dir: Option<PathBuf>,
@@ -17,6 +17,15 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Find saved Pi sessions and explain what prevents recovery. Never start work.
+    Discover {
+        /// Existing custom session directories; repeat for more than one location.
+        #[arg(long = "sessions-root")]
+        sessions_roots: Vec<PathBuf>,
+        /// Machine-readable output instead of the plain-English report.
+        #[arg(long)]
+        json: bool,
+    },
     /// Read native Pi history and optional pi-subagents status, without changing state.
     Inspect {
         #[arg(long)]
@@ -31,6 +40,9 @@ enum Command {
         session: PathBuf,
         #[arg(long, env = "PI_SUBAGENTS_TEMP_ROOT")]
         subagents_root: Option<PathBuf>,
+        /// Optional existing Fabric Pi usage JSONL; negative evidence only.
+        #[arg(long)]
+        usage_log: Option<PathBuf>,
     },
     /// Inspect one Codex thread through a configured same-user Unix WebSocket.
     ProbeCodex {
@@ -100,8 +112,11 @@ enum PolicyCommand {
         session: PathBuf,
     },
 }
-fn run() -> Result<serde_json::Value> {
-    let cli = Cli::parse();
+enum Output {
+    Json(serde_json::Value),
+    Text(String),
+}
+fn run(cli: Cli) -> Result<Output> {
     let dir = cli.state_dir.unwrap_or_else(|| {
         std::env::var_os("XDG_STATE_HOME")
             .map(PathBuf::from)
@@ -111,21 +126,34 @@ fn run() -> Result<serde_json::Value> {
             .join("reignite")
     });
     let req = match cli.command {
+        Command::Discover {
+            sessions_roots,
+            json,
+        } => {
+            let value = Store::new(dir)?.execute(Request::DiscoverPi { sessions_roots })?;
+            return if json {
+                Ok(Output::Json(value))
+            } else {
+                let report: reignite::discovery::Discovery = serde_json::from_value(value)?;
+                Ok(Output::Text(report.plain_text()))
+            };
+        }
         Command::Inspect {
             session,
             subagents_root,
         } => {
-            return Ok(serde_json::to_value(reignite::inspection::inspect(
-                &session,
-                subagents_root.as_deref(),
-            )?)?);
+            return Ok(Output::Json(serde_json::to_value(
+                reignite::inspection::inspect(&session, subagents_root.as_deref())?,
+            )?));
         }
         Command::AssessPi {
             session,
             subagents_root,
+            usage_log,
         } => Request::AssessPi {
             session_file: session,
             subagents_root,
+            usage_log,
         },
         Command::ProbeCodex {
             socket,
@@ -133,11 +161,13 @@ fn run() -> Result<serde_json::Value> {
             protocol: _,
             timeout_ms,
         } => {
-            return Ok(serde_json::to_value(reignite::codex_probe::probe(
-                &socket,
-                &thread,
-                std::time::Duration::from_millis(timeout_ms),
-            )?)?);
+            return Ok(Output::Json(serde_json::to_value(
+                reignite::codex_probe::probe(
+                    &socket,
+                    &thread,
+                    std::time::Duration::from_millis(timeout_ms),
+                )?,
+            )?));
         }
         Command::HandoffPi {
             session,
@@ -154,14 +184,16 @@ fn run() -> Result<serde_json::Value> {
             timeout_ms,
             profile,
         } => {
-            return Ok(serde_json::to_value(reignite::pi_delivery::deliver(
-                &Store::new(dir)?,
-                &session,
-                &ticket,
-                &pi_program,
-                &profile,
-                std::time::Duration::from_millis(timeout_ms),
-            )?)?);
+            return Ok(Output::Json(serde_json::to_value(
+                reignite::pi_delivery::deliver(
+                    &Store::new(dir)?,
+                    &session,
+                    &ticket,
+                    &pi_program,
+                    &profile,
+                    std::time::Duration::from_millis(timeout_ms),
+                )?,
+            )?));
         }
         Command::Policy { command } => match command {
             PolicyCommand::Show { session } => Request::PolicyStatus {
@@ -188,13 +220,24 @@ fn run() -> Result<serde_json::Value> {
             dry_run,
         },
     };
-    Store::new(dir)?.execute(req)
+    Store::new(dir)?.execute(req).map(Output::Json)
 }
 fn main() {
-    match run() {
-        Ok(value) => println!("{}", json!({"ok":true,"result":value})),
+    let cli = Cli::parse();
+    let plain = matches!(&cli.command, Command::Discover { json: false, .. });
+    match run(cli) {
+        Ok(Output::Json(value)) => println!("{}", json!({"ok":true,"result":value})),
+        Ok(Output::Text(text)) => print!("{text}"),
         Err(error) => {
-            println!("{}", json!({"ok":false,"error":format!("{error:#}")}));
+            if plain {
+                let message: String = format!("{error:#}")
+                    .chars()
+                    .flat_map(char::escape_default)
+                    .collect();
+                eprintln!("Could not check saved sessions: {message}");
+            } else {
+                println!("{}", json!({"ok":false,"error":format!("{error:#}")}));
+            }
             std::process::exit(1);
         }
     }

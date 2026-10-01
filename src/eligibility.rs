@@ -19,6 +19,7 @@ pub struct Assessment {
     pub policy_allowed: bool,
     pub requirements: Vec<Requirement>,
     pub reasons: Vec<Reason>,
+    pub recovery_gate: crate::pi_gate::Gate,
     pub persisted_lineage: PersistedLineage,
     pub delegated: Delegated,
     pub retained_records: Vec<Retained>,
@@ -69,6 +70,7 @@ fn reason(reasons: &mut Vec<Reason>, code: &'static str, source: &'static str) {
 pub(crate) fn assess<'a>(
     inspection: Inspection,
     lineage: PersistedLineage,
+    usage: crate::pi_gate::UsageEvidence,
     policy: &Policy,
     records: impl Iterator<Item = &'a Record>,
     boot: &str,
@@ -179,10 +181,7 @@ pub(crate) fn assess<'a>(
             attempt: record.attempt.clone(),
         });
     }
-    if matches!(
-        lineage.last_assistant_stop_reason,
-        Some("aborted" | "error")
-    ) {
+    if lineage.reported_work.aborted_messages > 0 || lineage.reported_work.error_messages > 0 {
         reason(
             &mut reasons,
             "reported_cancel_or_error",
@@ -191,7 +190,7 @@ pub(crate) fn assess<'a>(
     }
     match (
         lineage.last_message_role,
-        lineage.last_assistant_stop_reason,
+        lineage.reported_work.last_assistant_stop_reason,
     ) {
         (Some("assistant"), Some("stop" | "length")) => reason(
             &mut reasons,
@@ -273,6 +272,10 @@ pub(crate) fn assess<'a>(
         });
         reason(&mut reasons, fact, "missing_authoritative_evidence");
     }
+    let native_files_read = inspection.files_read + usage.files_read;
+    let native_bytes_read = inspection.bytes_read + usage.bytes_read;
+    let inspection_elapsed_micros = inspection.elapsed_micros + usage.elapsed_micros;
+    let recovery_gate = crate::pi_gate::gate(&lineage, policy_allowed, retained_blocker, usage);
     Assessment {
         schema: 1,
         harness: "pi",
@@ -289,13 +292,14 @@ pub(crate) fn assess<'a>(
         policy_allowed,
         requirements,
         reasons,
+        recovery_gate,
         persisted_lineage: lineage,
         delegated: inspection.delegated,
         retained_records,
         state_schema,
         migration_pending: state_schema == 1,
-        native_files_read: inspection.files_read,
-        native_bytes_read: inspection.bytes_read,
-        inspection_elapsed_micros: inspection.elapsed_micros,
+        native_files_read,
+        native_bytes_read,
+        inspection_elapsed_micros,
     }
 }

@@ -60,7 +60,12 @@ with tempfile.TemporaryDirectory(prefix="reignite-pi-handoff-") as temporary:
     session.chmod(0o600)
     profile = ["--offline", "-ne", "-ns", "-np", "-nc", "-na", "--no-tools", "-e", str(provider),
                "-e", str(dialogs), "--provider", "recovery-smoke", "--model", "fixture", "--thinking", "off"]
-    children, masters = [], []
+    children, masters, start_identities = [], [], {}
+
+    def owned_start(child):
+        fields = pathlib.Path(f"/proc/{child.pid}/stat").read_text().rsplit(")", 1)[1].split()
+        assert int(fields[1]) == os.getpid(), "not our immediate test child"
+        return fields[19]
 
     def cli(*args):
         result = subprocess.run([str(CLI), "--state-dir", str(state_dir), *args], cwd=project,
@@ -83,6 +88,7 @@ with tempfile.TemporaryDirectory(prefix="reignite-pi-handoff-") as temporary:
                                  cwd=project, env=env, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
         os.close(slave)
         children.append(child)
+        start_identities[child.pid] = owned_start(child)
         masters.append(master)
         return child, master
 
@@ -118,6 +124,7 @@ with tempfile.TemporaryDirectory(prefix="reignite-pi-handoff-") as temporary:
 
     def kill(child):
         if child.poll() is None:
+            assert owned_start(child) == start_identities[child.pid], "test PID/start identity changed"
             child.kill()  # Precisely the known native PID after exec, never a group.
         child.wait(timeout=5)
 

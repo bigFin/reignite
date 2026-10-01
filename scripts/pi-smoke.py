@@ -11,7 +11,6 @@ import pathlib
 import pty
 import select
 import shutil
-import signal
 import subprocess
 import tempfile
 import time
@@ -34,6 +33,7 @@ with tempfile.TemporaryDirectory(prefix="pi-recovery-smoke-") as temporary:
     observations = base / "observations.jsonl"
     env = {"PATH": os.environ["PATH"], "HOME": str(home), "TERM": "xterm-256color", "PI_OFFLINE": "1", "PI_CODING_AGENT_DIR": str(home / ".pi/agent"), "REIGNITE_CLI": str(CLI), "REIGNITE_STATE_DIR": str(state), "RECOVERY_SMOKE_OBSERVATIONS": str(observations)}
     children = []
+    start_identities = {}
     masters = []
     terminal_tail = bytearray()
     provider = base / "fake-provider.ts"
@@ -41,12 +41,18 @@ with tempfile.TemporaryDirectory(prefix="pi-recovery-smoke-") as temporary:
     shutil.copyfile(ROOT / "tests/fake-provider.ts", provider)
     args = ["node", str(entrypoint), "--offline", "-ne", "-ns", "-np", "-nc", "-na", "--no-tools", "-e", str(provider), "-e", str(ROOT / "adapters/pi.ts"), "--recovery-interactive", "--provider", "recovery-smoke", "--model", "fixture"]
 
+    def owned_start(child):
+        fields = pathlib.Path(f"/proc/{child.pid}/stat").read_text().rsplit(")", 1)[1].split()
+        assert int(fields[1]) == os.getpid(), "not our immediate test child"
+        return fields[19]
+
     def start(extra=()):
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         child = subprocess.Popen(args + list(extra), cwd=project, env=env, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
         os.close(slave)
         children.append(child)
+        start_identities[child.pid] = owned_start(child)
         masters.append(master)
         return child, master
 
@@ -90,7 +96,8 @@ with tempfile.TemporaryDirectory(prefix="pi-recovery-smoke-") as temporary:
 
     def kill(child):
         if child.poll() is None:
-            os.killpg(child.pid, signal.SIGKILL)
+            assert owned_start(child) == start_identities[child.pid], "test PID/start identity changed"
+            child.kill()  # Exactly this tracked immediate child, never a process group.
         child.wait(timeout=5)
 
     try:

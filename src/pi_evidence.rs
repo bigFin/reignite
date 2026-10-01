@@ -22,6 +22,16 @@ pub struct PersistedLineage {
     pub failed_or_unknown_tool_results: usize,
     pub opaque_entries: usize,
     pub system_loadout_reported: bool,
+    /// A user-message segment on the reported ancestry, NOT an authorized recovery episode.
+    pub reported_work: ReportedWork,
+}
+#[derive(Debug, Default, Serialize)]
+pub struct ReportedWork {
+    pub user_entry: Option<String>,
+    pub last_assistant_entry: Option<String>,
+    pub last_assistant_stop_reason: Option<&'static str>,
+    pub aborted_messages: usize,
+    pub error_messages: usize,
 }
 #[derive(Default)]
 pub(crate) struct Index {
@@ -173,8 +183,18 @@ impl Index {
                 report.last_message_entry = Some(entry.id.clone());
                 report.last_message_role = Some(role);
             }
+            if entry.role == Some("user") {
+                report.reported_work = ReportedWork {
+                    user_entry: Some(entry.id.clone()),
+                    ..Default::default()
+                };
+            }
             if entry.role == Some("assistant") {
                 report.last_assistant_stop_reason = entry.stop;
+                report.reported_work.last_assistant_entry = Some(entry.id.clone());
+                report.reported_work.last_assistant_stop_reason = entry.stop;
+                report.reported_work.aborted_messages += usize::from(entry.stop == Some("aborted"));
+                report.reported_work.error_messages += usize::from(entry.stop == Some("error"));
             }
             for call in &entry.calls {
                 if !calls.insert(call) {

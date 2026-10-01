@@ -7,13 +7,16 @@ Repository implementation is authorized; host deployment is separate. The
 
 | Area | Status |
 |---|---|
+| Current-user Pi discovery | Implemented; ordinary/custom storage across workspaces, bounded read-only batch and plain-English report; no boot hook or enrollment |
 | Pi native history/child-record inspection | Implemented; read-only, bounded, no enrollment |
-| Native Pi eligibility assessment | Implemented; policy/attempt-aware, strict raw lineage, observation-only; missing authority is not inferred |
+| Native Pi eligibility assessment | Implemented; observation-only. Native tests show pending cancellation can have identical streaming/history snapshots and two RPC processes can execute on one file without fencing |
 | Codex selected-thread probe | Implemented against disposable Unix-WebSocket fixtures; live Kitu compatibility unverified |
 | Native host policy and Pi disable overrides | Implemented; enabled by default, no enrollment |
 | Schema-1 migration | Implemented; preserves disables and every legacy record/attempt |
 | Real Pi owned-subprocess RPC | Reopen/no-work and bounded legacy-ticket delivery pass; real controller/native PID loss tested; native automatic eligibility/RPC human client missing |
 | Explicit Pi operator handoff | Native TUI exec route; real dialogs/waiting/active SIGKILL/repeated reopen pass; no live RPC-to-TUI attach |
+| Cancellation/uncertainty gate | Read-only scoped native blockers plus optional existing Fabric Pi usage JSONL; blocked/hold only, no automatic candidate |
+| Controlled Pi launch | Rejected product route; retained research fixture only, no production launcher |
 | Automatic native recovery and episode rearming | Not implemented |
 | Delegated-work recovery | Not implemented; existing harness controls remain authoritative |
 | OpenCode / Google Antigravity connectors | Not implemented |
@@ -28,14 +31,31 @@ Host-wide policy is not a new permission to run old conversations.
 [Native assessment](native-eligibility.md) now reports the precise evidence gaps.
 Real SDK branch/reset and RPC dialog fixtures confirm that persisted history,
 idle state and empty queues do not universally recover branch/human intent.
+The native intent smoke additionally proves a pending cancellation can retain
+identical streaming/history snapshots until a final message is persisted. Two
+RPC processes can also execute explicit offline model calls on the same file
+without an exclusive native lease. See the
+[control-contract conclusion](native-eligibility.md#current-control-contract-conclusion):
+a supported automatic case remains blocked, not merely awaiting a VM or boot
+service. The [cancellation gate](cancellation-gate.md) narrows negative evidence
+and exposes uncertain source coverage without a launch shim. The
+[controlled-launch experiment](controlled-pi-launch.md) is retained research only;
+that product direction was rejected.
 
-## Next: prove an owned Pi control route
+## Next: establish a noninvasive positive case
+
+[Discovery](discovery.md) now finds existing native files without session
+registration, applies one retained-policy snapshot, and reports cancellations,
+blockers and uncertainty. It does not infer reboot interruption, join generic
+telemetry, start work or install a boot trigger.
 
 Pi is required acceptance, not deferred behind Codex or a Pi-server migration.
 The assessor currently permits observation only. Establish a supported owner-bound
 source of missing authoritative intent/branch/human/profile/episode facts before
 adding any positive native eligibility case; do not fabricate lifecycle facts.
-Build on the tested native SDK/RPC or ordinary CLI. The bounded transport now
+Keep ordinary startup unchanged; do not introduce SDK launch hosting or key
+interception. Native SDK/RPC references remain useful for read-only evidence and
+explicit isolated tests, not a required launch route. The bounded transport now
 continuously drains/correlates owned pipes and forwards the explicitly supplied
 profile. Original profile evidence, exclusive conversation ownership and a live
 RPC operator client remain missing. The explicit [manual handoff](operator-handoff.md)

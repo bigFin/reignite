@@ -78,6 +78,18 @@ client at launch; native dialogs remain open without a bounded RPC disposal.
 This is ordinary manual use, not a live RPC-to-TUI transfer or positive recovery
 decision. Live RPC human routing and automatic replacement remain unfinished.
 
+[Discovery](discovery.md) finds existing Pi files across the current user's
+selected storage locations, applies one locked policy snapshot and gives a
+plain-English report. It does not require session registration, infer interruption
+from recency, install a boot hook or launch work.
+
+The [cancellation gate](cancellation-gate.md) uses native stop reasons and optional
+existing usage records to distinguish recorded blockers from uncertainty. It
+never treats missing cancellation as permission. Ordinary harness startup stays
+unchanged. [Controlled-launch research](controlled-pi-launch.md) is retained as
+negative/ordering evidence only: its SDK startup wrapper and key interception
+were rejected as a product direction, despite requiring no fork.
+
 The experimental upstream `@earendil-works/pi-server` is an optional deployment
 candidate, not a prerequisite. It is a library, not a ready-made daemon. Any
 adoption must prove durable history, existing-client/extension compatibility,
