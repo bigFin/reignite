@@ -22,7 +22,10 @@ export default function (pi: ExtensionAPI) {
         else stream.push({ type: "done", reason: "stop", message });
         stream.end();
       };
-      const timer = setTimeout(finish, !recovery && text?.includes("busy fixture") ? 60000 : 30);
+      const requestedDelay = Number(process.env.RECOVERY_SMOKE_DELAY_MS);
+      const delay = Number.isFinite(requestedDelay) && requestedDelay >= 30 && requestedDelay <= 60000
+        ? requestedDelay : !recovery && text?.includes("busy fixture") ? 60000 : 30;
+      const timer = setTimeout(finish, delay);
       options?.signal?.addEventListener("abort", () => { clearTimeout(timer); finish(); }, { once: true });
       return stream;
     },

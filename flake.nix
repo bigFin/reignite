@@ -1,5 +1,5 @@
 {
-  description = "Reignite: opt-in recovery for interrupted coding agents";
+  description = "Reignite: standalone recovery tools for interrupted coding agents";
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   outputs = { self, nixpkgs }: let
     forLinux = nixpkgs.lib.genAttrs [ "aarch64-linux" "x86_64-linux" ];
@@ -13,10 +13,12 @@
         src = pkgs.lib.fileset.toSource {
           root = ./.;
           fileset = pkgs.lib.fileset.unions [
-            ./Cargo.toml ./Cargo.lock ./src ./tests/cli.rs
+            ./Cargo.toml ./Cargo.lock ./src ./tests/cli.rs ./tests/inspection.rs ./tests/codex_probe.rs ./tests/host_policy.rs
+            ./tests/pi_delivery.rs ./tests/fixtures/pi-rpc-peer.py ./tests/native_eligibility.rs ./tests/pi_handoff.rs
           ];
         };
         cargoLock.lockFile = ./Cargo.lock;
+        nativeCheckInputs = [ pkgs.python3 ];
       };
     });
     checks = forLinux (system: {
@@ -26,7 +28,7 @@
       default = {
         type = "app";
         program = "${self.packages.${system}.default}/bin/reignite";
-        meta.description = "Inspect and authorize opt-in coding-agent recovery";
+        meta.description = "Inspect native sessions and manage recovery policy";
       };
     });
     devShells = forLinux (system: let pkgs = pkgsFor system; in {

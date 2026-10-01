@@ -1,4 +1,12 @@
-//! Durable opt-in policy. Adapters provide observations, never persisted commands or prompts.
+//! Recovery policy and standalone inspection. Never persist commands or prompts.
+pub mod codex_probe;
+pub mod eligibility;
+pub mod inspection;
+pub mod pi_delivery;
+mod pi_evidence;
+pub mod pi_handoff;
+mod pi_rpc;
+pub mod policy;
 use anyhow::{Context, Result, bail, ensure};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -7,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -64,7 +72,79 @@ pub enum Activity {
 #[serde(deny_unknown_fields)]
 struct Database {
     schema: u32,
+    policy: policy::Policy,
+    #[serde(deserialize_with = "unique_map")]
     records: BTreeMap<String, Record>,
+}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyDatabase {
+    schema: u32,
+    #[serde(deserialize_with = "unique_map")]
+    records: BTreeMap<String, Record>,
+}
+// Duplicate map keys must not silently replace disables or uncertain attempts.
+pub(crate) fn unique_map<'de, D, V>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<String, V>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    V: Deserialize<'de>,
+{
+    struct Visitor<V>(std::marker::PhantomData<V>);
+    impl<'de, V: Deserialize<'de>> serde::de::Visitor<'de> for Visitor<V> {
+        type Value = BTreeMap<String, V>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a map with unique state keys")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut input: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut map = BTreeMap::new();
+            while let Some((key, value)) = input.next_entry()? {
+                if map.insert(key, value).is_some() {
+                    return Err(serde::de::Error::custom("duplicate state key"));
+                }
+            }
+            Ok(map)
+        }
+    }
+    deserializer.deserialize_map(Visitor(std::marker::PhantomData))
+}
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredDatabase {
+    Current(Database),
+    Legacy(LegacyDatabase),
+}
+impl StoredDatabase {
+    fn into_current(self) -> Result<Database> {
+        match self {
+            Self::Current(db) => {
+                ensure!(db.schema == 2, "unknown state schema");
+                Ok(db)
+            }
+            Self::Legacy(legacy) => {
+                ensure!(legacy.schema == 1, "unknown state schema");
+                let mut policy = policy::Policy::default();
+                for record in legacy.records.values() {
+                    if !record.enabled || record.activity == Activity::Stopped {
+                        policy.disable(
+                            &record.identity,
+                            policy::DisableReason::LegacyDisabledOrStopped,
+                        );
+                    }
+                }
+                // Keep schema 1 until a successful mutation commits the migration.
+                Ok(Database {
+                    schema: 1,
+                    policy,
+                    records: legacy.records,
+                })
+            }
+        }
+    }
 }
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -96,6 +176,19 @@ pub enum Request {
         session_file: PathBuf,
     },
     Status,
+    PolicyStatus {
+        session_file: Option<PathBuf>,
+    },
+    AssessPi {
+        session_file: PathBuf,
+        subagents_root: Option<PathBuf>,
+    },
+    SetHostPolicy {
+        enabled: bool,
+    },
+    ClearDisable {
+        session_file: PathBuf,
+    },
     Recover {
         session_file: PathBuf,
         dry_run: bool,
@@ -169,34 +262,12 @@ fn validate(i: &Identity) -> Result<(u64, u64)> {
         identifier(&i.session_id) && i.leaf.as_ref().is_none_or(|l| identifier(l)),
         "invalid identifier"
     );
-    canonical(&i.cwd)?;
-    canonical(&i.session_file)?;
-    let f = File::open(&i.session_file)?;
-    let m = f.metadata()?;
+    let session = inspection::registered_session(i)?;
     ensure!(
-        m.is_file() && m.uid() == unsafe { libc::geteuid() },
-        "invalid session file owner/type"
-    );
-    let mut lines = BufReader::new(f).lines();
-    let h: Value = serde_json::from_str(&lines.next().context("missing session header")??)?;
-    ensure!(
-        h["type"] == "session"
-            && h["version"] == 3
-            && h["id"] == i.session_id
-            && h["cwd"].as_str() == i.cwd.to_str(),
+        session.native_id == i.session_id && session.cwd == i.cwd,
         "session header identity mismatch"
     );
-    if let Some(leaf) = &i.leaf {
-        let mut found = false;
-        for line in lines {
-            let v: Value = serde_json::from_str(&line?)?;
-            if v["id"] == *leaf {
-                found = true;
-            }
-        }
-        ensure!(found, "branch leaf absent from session file");
-    }
-    Ok((m.dev(), m.ino()))
+    Ok((session.device, session.inode))
 }
 fn matches(r: &Record, i: &Identity, inode: (u64, u64), branch: bool) -> Result<()> {
     ensure!(
@@ -259,9 +330,45 @@ impl Store {
     }
     /// Execute against the kernel's actual boot observation. No CLI boot override exists.
     pub fn execute(&self, request: Request) -> Result<Value> {
-        self.execute_observed(request, &boot_id()?, now()?)
+        self.execute_observed(request, &boot_id()?)
     }
-    fn execute_observed(&self, request: Request, boot: &str, time: u64) -> Result<Value> {
+    // Transitional transport authority only. Native eligibility is not inferred
+    // from this snapshot; Open revalidates policy/ticket atomically at claim time.
+    pub(crate) fn pi_ticket_scope(&self, path: &Path, ticket: &str) -> Result<Record> {
+        Uuid::parse_str(ticket).context("invalid restore ticket")?;
+        let snapshot = self.execute(Request::Status)?;
+        let policy: policy::Policy = serde_json::from_value(snapshot["policy"].clone())?;
+        let record: Record = snapshot["records"].as_array().context("missing records")?
+            .iter().filter_map(|record| serde_json::from_value::<Record>(record.clone()).ok())
+            .find(|record| record.identity.session_file == path)
+            .context("no registered legacy restore context; native automatic recovery is not implemented")?;
+        ensure!(
+            policy.blocked_reason(&record.identity).is_none(),
+            "restore blocked by host/session policy"
+        );
+        let boot = boot_id()?;
+        ensure!(
+            record.enabled
+                && record.activity == Activity::Busy
+                && !record.shutdown_ambiguous
+                && record.owner.boot != boot
+                && !live(&record.owner, &boot),
+            "legacy restore no longer eligible"
+        );
+        let attempt = record
+            .attempt
+            .as_ref()
+            .context("missing restore authorization")?;
+        ensure!(
+            attempt.id == ticket
+                && attempt.boot == boot
+                && attempt.status == "authorized"
+                && attempt.expires >= now()?,
+            "stale/consumed/mismatched restore ticket"
+        );
+        Ok(record)
+    }
+    fn execute_observed(&self, request: Request, boot: &str) -> Result<Value> {
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
@@ -281,20 +388,32 @@ impl Store {
                     .custom_flags(libc::O_NOFOLLOW)
                     .open(&path)?;
                 ensure!(f.metadata()?.len() <= 16 * 1024 * 1024, "state too large");
-                serde_json::from_reader::<_, Database>(f)
+                let mut bytes = Vec::new();
+                f.take(16 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+                ensure!(
+                    bytes.len() <= 16 * 1024 * 1024,
+                    "state grew beyond byte limit"
+                );
+                serde_json::from_slice::<StoredDatabase>(&bytes)
                     .context("corrupt/unknown state; refusing recovery")?
+                    .into_current()?
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Database {
-                schema: 1,
+                schema: 2,
+                policy: policy::Policy::default(),
                 records: BTreeMap::new(),
             },
             Err(error) => return Err(error.into()),
         };
-        ensure!(db.schema == 1, "unknown state schema");
+        db.policy.validate()?;
         for (k, r) in &db.records {
             ensure!(
                 k == &key(&r.identity.session_file)
+                    && r.identity.harness == "pi"
+                    && r.identity.session_file.is_absolute()
+                    && r.identity.cwd.is_absolute()
                     && identifier(&r.identity.session_id)
+                    && r.identity.leaf.as_deref().is_none_or(identifier)
                     && Uuid::parse_str(&r.owner.boot).is_ok(),
                 "corrupt record identity"
             );
@@ -307,8 +426,15 @@ impl Store {
                 );
             }
         }
-        let (result, changed) = apply(&mut db, request, boot, time)?;
+        let (result, changed) = apply(&mut db, request, boot)?;
         if changed {
+            db.schema = 2;
+            let mut bytes = serde_json::to_vec(&db)?;
+            bytes.push(b'\n');
+            ensure!(
+                bytes.len() <= 16 * 1024 * 1024,
+                "state/migration exceeds byte limit; original retained"
+            );
             let tmp = self.dir.join(format!(".state-{}", Uuid::new_v4()));
             let write = (|| -> Result<()> {
                 let mut f = OpenOptions::new()
@@ -316,8 +442,7 @@ impl Store {
                     .create_new(true)
                     .mode(0o600)
                     .open(&tmp)?;
-                serde_json::to_writer(&mut f, &db)?;
-                f.write_all(b"\n")?;
+                f.write_all(&bytes)?;
                 f.sync_all()?;
                 fs::rename(&tmp, &path)?;
                 File::open(&self.dir)?.sync_all()?;
@@ -331,42 +456,126 @@ impl Store {
         Ok(result)
     }
 }
-fn apply(db: &mut Database, req: Request, boot: &str, time: u64) -> Result<(Value, bool)> {
+fn apply(db: &mut Database, req: Request, boot: &str) -> Result<(Value, bool)> {
     match req {
         Request::Status => Ok((
-            json!({"records": db.records.values().collect::<Vec<_>>(), "boot":boot}),
+            json!({"records": db.records.values().collect::<Vec<_>>(), "boot":boot,
+                "policy":db.policy,"state_schema":db.schema,"migration_pending":db.schema == 1}),
             false,
         )),
+        Request::PolicyStatus { session_file } => {
+            let identity = session_file
+                .as_deref()
+                .map(inspection::native_identity)
+                .transpose()?;
+            let mut legacy_blockers = Vec::new();
+            let mut legacy_attempts = Vec::new();
+            if let Some(identity) = &identity {
+                for record in db.records.values().filter(|record| {
+                    record.identity.harness == identity.harness
+                        && record.identity.session_id == identity.session_id
+                }) {
+                    if !record.enabled {
+                        legacy_blockers.push("legacy_session_disabled");
+                    }
+                    if record.activity == Activity::Stopped {
+                        legacy_blockers.push("legacy_session_stopped");
+                    }
+                    if record.shutdown_ambiguous {
+                        legacy_blockers.push("legacy_shutdown_ambiguous");
+                    }
+                    if let Some(attempt) = &record.attempt {
+                        legacy_blockers.push("legacy_attempt_retained");
+                        legacy_attempts.push(attempt);
+                    }
+                }
+            }
+            legacy_blockers.sort_unstable();
+            legacy_blockers.dedup();
+            Ok((
+                json!({"policy":db.policy,"session":identity,
+                "policy_enabled_for_session":identity.as_ref().map(|identity| db.policy.blocked_reason(identity).is_none()),
+                "legacy_blockers":legacy_blockers,"legacy_attempts":legacy_attempts,
+                "eligible":false,"native_automatic_recovery_implemented":false,
+                "state_schema":db.schema,"migration_pending":db.schema == 1}),
+                false,
+            ))
+        }
+        Request::AssessPi {
+            session_file,
+            subagents_root,
+        } => {
+            let (inspection, lineage) =
+                inspection::inspect_for_assessment(&session_file, subagents_root.as_deref())?;
+            let report = eligibility::assess(
+                inspection,
+                lineage,
+                &db.policy,
+                db.records.values(),
+                boot,
+                db.schema,
+            );
+            Ok((serde_json::to_value(report)?, false))
+        }
+        Request::SetHostPolicy { enabled } => {
+            db.policy.host_enabled = enabled;
+            Ok((json!({"policy":db.policy,"attempts_reset":false}), true))
+        }
+        Request::ClearDisable { session_file } => {
+            let identity = inspection::native_identity(&session_file)?;
+            let cleared = db.policy.clear_disable(&identity);
+            Ok((
+                json!({"cleared":cleared,"session":identity,"attempts_reset":false,
+                "legacy_records_changed":false}),
+                true,
+            ))
+        }
         Request::Disable { session_file } => {
-            canonical(&session_file)?;
-            let r = db
-                .records
-                .get_mut(&key(&session_file))
-                .context("unregistered session")?;
-            r.enabled = false;
-            r.activity = Activity::Stopped;
-            Ok((json!({"record":r}), true))
+            let identity = inspection::native_identity(&session_file)?;
+            db.policy
+                .disable(&identity, policy::DisableReason::Explicit);
+            // Block all retained aliases of the native session without erasing attempts.
+            for record in db.records.values_mut().filter(|record| {
+                record.identity.harness == identity.harness
+                    && record.identity.session_id == identity.session_id
+            }) {
+                record.enabled = false;
+                record.activity = Activity::Stopped;
+            }
+            Ok((
+                json!({"disabled":db.policy.disabled(&identity),
+                "record":db.records.get(&key(&session_file)),"attempts_reset":false}),
+                true,
+            ))
         }
         Request::Recover {
             session_file,
             dry_run,
         } => {
-            canonical(&session_file)?;
-            let r = db
-                .records
-                .get_mut(&key(&session_file))
-                .context("unregistered session")?;
+            let identity = inspection::native_identity(&session_file)?;
+            let policy_reason = db.policy.blocked_reason(&identity).map(str::to_owned);
+            let Some(r) = db.records.get_mut(&key(&session_file)) else {
+                let reason = policy_reason.unwrap_or_else(|| "native automatic recovery is not implemented; lifecycle and ownership evidence missing".into());
+                ensure!(dry_run, "{reason}");
+                return Ok((
+                    json!({"eligible":false,"blocked_reason":reason,"identity":identity,
+                        "eligibility_scope":"native_unimplemented","native_eligibility_verified":false}),
+                    false,
+                ));
+            };
             matches(r, &r.identity, validate(&r.identity)?, true)?;
-            let reason = eligible(r, boot).err().map(|e| e.to_string());
+            let reason = policy_reason.or_else(|| eligible(r, boot).err().map(|e| e.to_string()));
             if dry_run {
                 return Ok((
-                    json!({"eligible":reason.is_none(), "blocked_reason":reason, "record":r}),
+                    json!({"eligible":reason.is_none(), "blocked_reason":reason, "record":r,
+                        "eligibility_scope":"legacy_prototype","native_eligibility_verified":false}),
                     false,
                 ));
             }
             if let Some(reason) = reason {
                 bail!(reason);
             }
+            let time = now()?; // After locking and validating the source.
             let a = Attempt {
                 id: Uuid::new_v4().to_string(),
                 boot: boot.to_owned(),
@@ -382,6 +591,12 @@ fn apply(db: &mut Database, req: Request, boot: &str, time: u64) -> Result<(Valu
             pid,
             ticket,
         } => {
+            if ticket.is_some() {
+                ensure!(
+                    db.policy.blocked_reason(&identity).is_none(),
+                    "restore blocked by host/session policy"
+                );
+            }
             let inode = validate(&identity)?;
             let o = owner(pid, boot, &identity.cwd)?;
             let k = key(&identity.session_file);
@@ -408,7 +623,7 @@ fn apply(db: &mut Database, req: Request, boot: &str, time: u64) -> Result<(Valu
                     ensure!(
                         a.id == *ticket
                             && a.boot == boot
-                            && a.expires >= time
+                            && a.expires >= now()?
                             && a.status == "authorized",
                         "stale/consumed/mismatched ticket"
                     );
@@ -440,17 +655,24 @@ fn apply(db: &mut Database, req: Request, boot: &str, time: u64) -> Result<(Valu
             ))
         }
         Request::Enable { identity, pid } => {
-            let r = owned(db, &identity, pid, boot)?;
-            ensure!(
-                r.activity != Activity::Busy && r.activity != Activity::Waiting,
-                "enable only when idle/stopped"
-            );
-            r.enabled = true;
-            r.activity = Activity::Idle;
-            r.shutdown_ambiguous = false;
-            r.attempt = None;
-            r.identity.leaf = identity.leaf;
-            Ok((json!({"record":r}), true))
+            ensure!(db.policy.host_enabled, "host recovery disabled");
+            let record = {
+                let r = owned(db, &identity, pid, boot)?;
+                ensure!(
+                    r.activity != Activity::Busy && r.activity != Activity::Waiting,
+                    "enable only when idle/stopped"
+                );
+                r.enabled = true;
+                r.activity = Activity::Idle;
+                r.shutdown_ambiguous = false;
+                r.attempt = None;
+                r.identity.leaf = identity.leaf.clone();
+                r.clone()
+            };
+            // The legacy explicit enable command retains its documented manual reset.
+            // New host-policy/clear-disable commands never perform this reset.
+            db.policy.clear_disable(&identity);
+            Ok((json!({"record":record}), true))
         }
         Request::Observe {
             identity,
@@ -468,7 +690,14 @@ fn apply(db: &mut Database, req: Request, boot: &str, time: u64) -> Result<(Valu
             } else {
                 Activity::Stopped
             };
-            Ok((json!({"record":r}), true))
+            let record = r.clone();
+            if activity == Activity::Stopped {
+                db.policy.disable(
+                    &record.identity,
+                    policy::DisableReason::LegacyDisabledOrStopped,
+                );
+            }
+            Ok((json!({"record":record}), true))
         }
         Request::Shutdown { identity, pid } => {
             let r = owned(db, &identity, pid, boot)?;

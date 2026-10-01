@@ -243,7 +243,7 @@ fn corrupt_unknown_or_nonprivate_state_fails_closed_without_replacing_it() {
         let p = f.state().join("state.json");
         match case {
             "json" => fs::write(&p, "{broken").unwrap(),
-            "schema" => f.edit(|db| db["schema"] = json!(2)),
+            "schema" => f.edit(|db| db["schema"] = json!(3)),
             "field" => f.edit(|db| db["unknown"] = json!(true)),
             "permissions" => {
                 use std::os::unix::fs::PermissionsExt;
@@ -304,4 +304,119 @@ fn practical_commands_and_api_acceptance_keep_attempt_visible() {
         .unwrap();
     assert!(out.status.success());
     assert_eq!(f.record()["enabled"], false);
+}
+
+#[test]
+fn ticket_expiring_while_waiting_for_the_store_lock_is_not_claimed() {
+    use fs2::FileExt;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    let f = Fixture::new();
+    f.busy();
+    f.old_boot();
+    let ticket = f.ok(f.recover(false))["ticket"].clone();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(f.state().join("lock"))
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+    let mut child = f
+        .cmd()
+        .arg("request")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(f.open(ticket).to_string().as_bytes())
+        .unwrap();
+    let started = Instant::now();
+    while !fs::read_to_string(format!("/proc/{}/wchan", child.id()))
+        .is_ok_and(|channel| channel.contains("locks_lock"))
+    {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "claim did not reach the held lock"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let expires = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 1;
+    f.edit(|db| {
+        for record in db["records"].as_object_mut().unwrap().values_mut() {
+            record["attempt"]["expires"] = json!(expires);
+        }
+    });
+    std::thread::sleep(Duration::from_secs(2));
+    FileExt::unlock(&lock).unwrap();
+    let output = child.wait_with_output().unwrap();
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        !output.status.success(),
+        "expired claim succeeded: {response}"
+    );
+    assert!(
+        response["error"]
+            .as_str()
+            .unwrap()
+            .contains("stale/consumed/mismatched")
+    );
+    assert_eq!(f.record()["attempt"]["status"], "authorized");
+}
+
+#[test]
+fn legacy_validation_uses_bounded_complete_private_native_sources() {
+    use std::os::unix::fs::PermissionsExt;
+    for case in [
+        "large_file",
+        "large_entry",
+        "writable",
+        "incomplete_null_leaf",
+    ] {
+        let f = Fixture::new();
+        f.busy();
+        let before = fs::read(f.state().join("state.json")).unwrap();
+        let session = f.identity["session_file"].as_str().unwrap();
+        let mut request = f.open(Value::Null);
+        match case {
+            "large_file" => fs::OpenOptions::new()
+                .write(true)
+                .open(session)
+                .unwrap()
+                .set_len(128 * 1024 * 1024 + 1)
+                .unwrap(),
+            "large_entry" => {
+                let mut file = fs::OpenOptions::new().append(true).open(session).unwrap();
+                writeln!(
+                    file,
+                    "{}",
+                    json!({"type":"custom", "id":"large", "data":"x".repeat(1024 * 1024)})
+                )
+                .unwrap();
+            }
+            "writable" => fs::set_permissions(session, fs::Permissions::from_mode(0o666)).unwrap(),
+            "incomplete_null_leaf" => {
+                request["identity"]["leaf"] = Value::Null;
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(session)
+                    .unwrap()
+                    .write_all(b"{\"type\":")
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(f.run(request)["ok"], false, "{case}");
+        assert_eq!(
+            fs::read(f.state().join("state.json")).unwrap(),
+            before,
+            "{case}"
+        );
+    }
 }
